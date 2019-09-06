@@ -1,0 +1,45 @@
+#
+# build coalesce script
+#
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+svrmgrl << EOF
+connect internal
+set echo off
+set termout off
+spool /tmp/coal1.${ORACLE_SID}.log
+select  'alter tablespace '||tablespace_name|| ' COALESCE;' from dba_tablespaces;
+spool off
+
+spool /tmp/coal2.${ORACLE_SID}.log
+!grep ^alter /tmp/coal1.${ORACLE_SID}.log >/tmp/coal1.${ORACLE_SID}.sql
+
+select tablespace_name,
+  sqrt(max(blocks)/sum(blocks))*(100/sqrt(sqrt(count(blocks)))) fsci
+  FROM dba_free_space
+GROUP BY tablespace_name
+ORDER BY 1;
+
+@/tmp/coal1.${ORACLE_SID}.sql
+
+select tablespace_name,
+  sqrt(max(blocks)/sum(blocks))*(100/sqrt(sqrt(count(blocks)))) fsci
+  FROM dba_free_space
+GROUP BY tablespace_name
+ORDER BY 1;
+
+spool off
+
+exit
+EOF
+
+cat /tmp/coal2.${ORACLE_SID}.log >>/tmp/ana3.${ORACLE_SID}.log

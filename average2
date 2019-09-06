@@ -1,0 +1,25 @@
+# this script compute Hit ratio average of all oracle databases
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+mv  /tmp/`basename $0`.trc /tmp/`basename $0`.trc.$$
+for i in eux011 eux012 eux014 eux016 eux030 eux040 eux048 eux050 eux090 eux120 eux130 eux152 eux153 eux180 eux220 eux231 eux250 eux280 eux321 eux322 eux330 eux350 eux380 eux390 eux420 eux430 eux450 eux520 eux551 eux620 eux650 eux720 eux750 eux950 eux960 euxb20 max011.kir mux011.mua tpx012.tpy cax011.cas szx011.szs
+
+do
+	echo $i
+	remsh $i /usr/local/oracle/or-chkhit
+	remsh $i "grep opcmon /tmp/or-chkhit.log" >>/tmp/`basename $0`.trc
+done
+grep -v "=0$" /tmp/`basename $0`.trc|grep -v "chkhit= $"|grep -v "chkhit= -"|grep -v "chkhit=100$"|cut -f2 |
+awk -F= 'BEGIN {val=0;cnt=0} 
+{val=val+$2;
+ cnt=cnt+1} 
+END {print val;print cnt;print val/cnt}'

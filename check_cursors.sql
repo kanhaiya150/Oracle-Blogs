@@ -1,0 +1,1 @@
+SELECT /*+ index(c) index(q) use_nl(q) */ q.piece, q.sql_text FROM v$open_cursor c, v$sqltext_with_newlines q where c.sid = 524 and c.address = q.address and c.hash_value = q.hash_value order by q.address, q.hash_value, q.piece asc

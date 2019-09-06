@@ -1,0 +1,77 @@
+#!/usr/bin/ksh
+#
+# Script intended to list dead oracle sessions
+#
+#
+#
+
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="ORACLE_SID=${SID};ORACLE_HOME=${OHOME};export ORACLE_SID ORACLE_HOME"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+echo "                                       LIST OF ORACLE DEAD SESSIONS"
+echo "                                     ================================"
+	ps -ef |grep oracle${SID}" "|grep -v grep |grep =YES|awk '{printf "%s %s\n",$2,$3}'|grep " 1$"|awk '{print $1}'

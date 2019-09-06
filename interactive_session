@@ -1,0 +1,70 @@
+#!/usr/bin/ksh
+#
+# Script intended to list interactive oracle sessions
+#
+#
+#
+
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias ll="ls -l" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+    echo "you must launch this script as root"
+    exit 1
+	fi
+fi
+
+if [ `bdf /tmp | grep tmp | awk '{print $5}' | tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+if [ $# -ne 1 ]
+then
+  echo "Usage : $0 <instance name>"
+  echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+  exit 1
+else
+  if grep -q "^$1:" /etc/ORATAB
+  then
+    echo "\nInstance $1 exists in /etc/ORATAB\n"
+  else
+    echo "Instance <$1> does not exist Please check"
+    echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+    exit 1
+  fi
+fi
+
+export SID=$1
+
+ps -ef | grep oracle${SID} | grep -v grep | grep -i "local=yes" | awk '{print $1 " " $2 " " $3}' > /tmp/interactive_session.log
+
+while read OSACCOUNT SPID FATHER
+do
+	TTY=`ps -ef | grep ${FATHER} | grep -v grep | grep -v oracle${SID} | awk '{print $6}'`
+	#echo ${TTY}
+	if [ "${TTY}" != "?" ]
+	then
+		echo "Session owned by OS account ${OSACCOUNT} and spid ${SPID} (father is ${FATHER}) is an interactive session."
+  fi
+done < /tmp/interactive_session.log
+	
+rm -f /tmp/interactive_session.log
+

@@ -1,0 +1,99 @@
+#!/bin/ksh
+#
+# Displaying process/session list
+#
+# Arguments: see Usage string below
+#
+#
+
+USAGE=$(cat <<!
+\n\tUsage: $(basename $0) instance [and-where-clause] \n
+  \tDesc : \tdisplaying user session list on a chosen database on current node \n
+  \tOpts : \tand-where-clause: SQL clause beginning with 'and' like examples below:\n
+  \t       \t"and OSUSER='osuser'" ; "and process='PID'" ; "and SCHEMANAME='db-user'" \n
+  \tArgs just used: $*\n
+!)
+
+# Arg number check
+if [ $# -lt 1 ]
+then
+    echo $USAGE; exit 1
+fi
+
+# functions library and common fixed variables PATH,CFG
+. $(dirname $0)/IamAdbTool.env
+
+# Fixed parans
+MAIN=$(basename $0)
+# defaults
+SQL=NO
+KEEP=""    # empty option
+
+# overloading db name param (compatibility with IamAdbTool.env)
+DB_NAME=$1
+# optional parameter interpretation (used only if $2="-search")
+OPTIONS="$2"
+MINUTES=$3
+# set default value for loop delay
+if [ -z "$MINUTES" ]
+then
+   MINUTES=4
+fi
+
+shift
+# prevent file name generation
+set -f
+WHERE="$*"
+
+# osuser behaviour
+if [ "$OSUSER" = "" ]
+then
+    # default: exclude myself to avoid seeing this script's request
+    USERWHERE="and s.osuser != '"$(whoami)"'"
+else
+    if [ "$OSUSER" = "ALL" ]
+    then
+        USERWHERE=""
+    else
+        # value provided: select only one user
+        USERWHERE="and s.osuser = '"$OSUSER"'"
+    fi
+fi
+# default columns
+if [ "$COLS" = "" ]
+then
+    if [ "$SQL" = "YES" ]
+    then
+        if [ "$SHORTOUTPUT" = "YES" ]
+        then
+            COLS="substr('SID: '||SID||' '||schemaname||' '||ltrim(rtrim(machine))||'  PID: '||process,1,40) as PID_on_machine_and_SID_owner"
+        else
+            COLS="machine||'  PID: '||process,substr(schemaname,1,10),osuser,TERMINAL,PROGRAM,command,module"
+        fi
+    else
+        COLS="SID,osuser,substr(schemaname,1,10),lockwait,status,PROGRAM,module"
+    fi
+fi
+
+# compose process/user info, forget PID if NT connection
+# COLS: not used
+COLS="substr('SID: '||SID||' PID: '||decode(instr('process',':'),0,process,-1,'error','')||' '||schemaname||' on '||ltrim(rtrim(machine)),1,50) as PID_on_machine_and_SID_owner"
+# Core of the query: used
+SELECT_CORE="S.sid,S.serial#,P.spid,S.osuser,substr(S.username,1,15) as USERNAME,substr(S.machine,1,20) as MACHINE,to_char(logon_time,'MON-DD:HH24:MI') as logon_At,substr(trunc((sysdate - logon_time)*24)||':'|| trunc(((sysdate-logon_time)*24-trunc((sysdate - logon_time)*24))*60),1,8) as HR_minutes,s.command,s.program,s.module from v\$PROCESS P,v\$SESSION S where P.addr=S.paddr and S.type='USER'"
+
+if ( echo $OPTIONS | grep -q '-search' )
+then
+
+   ## search mode: we select only long sessions or BO sessions
+   sql $DB_NAME "SELECT $SELECT_CORE and (sysdate-logon_time)*24*60 > $MINUTES order by s.sid;" 
+   ## no-join version (does not give the unix PID)
+   ## sql $DB_NAME "SELECT sid,serial#,osuser,substr(username,1,15) as USERNAME,substr(machine,1,20) as MACHINE,to_char(logon_time,'MON-DD:HH24:MI') as logon_At,trunc((sysdate - logon_time)*24)||':'|| trunc(((sysdate-logon_time)*24-trunc((sysdate - logon_time)*24))*60) as HR_minutes,program from v\$SESSION where type='USER' and (sysdate-logon_time)*24*60 > $MINUTES ;" 
+
+else
+
+   ## normal mode: general list
+   sql $DB_NAME "SELECT $SELECT_CORE $USERWHERE $WHERE order by s.sid;"  |cut -c 5-
+
+fi
+
+### end of script

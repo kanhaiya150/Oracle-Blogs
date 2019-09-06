@@ -1,0 +1,28 @@
+
+# this script compute Hit ratio average of all oracle databases
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+mv  /tmp/`basename $0`.trc /tmp/`basename $0`.trc.$$
+for i in eux010 eux030 eux040 eux050 eux070 eux090 eux120 eux130 eux151 eux152 eux153 eux180 eux210 eux220 eux231 eux250 eux280 eux321 eux322 eux350 eux380 eux390 eux420 eux450 eux520 eux551 eux620 eux650 eux720 max011.kir mux011.mua tpx012.tpy
+
+do
+	echo $i
+	echo $i"\c">>/tmp/`basename $0`.trc
+	remsh $i "IFS=:;grep -v -e \"^#\" -e \"^$\" /etc/ORATAB|while read SID ORACLE_HOME FLAG USER VG
+do 
+if ps -ef |grep \" ora_.*_\$SID\$\"|grep -qv grep
+then 
+echo \$SID\"\c\"
+/usr/local/oracle/uptime \$SID|grep -v row |grep ^[0-9]
+fi
+done" >>/tmp/`basename $0`.trc
+done

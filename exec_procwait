@@ -1,0 +1,5 @@
+svrmgrl<<EOF
+connect internal
+execute get_dblink_session_wait (432000,300);
+exit
+EOF

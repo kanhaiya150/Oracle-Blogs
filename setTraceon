@@ -1,0 +1,148 @@
+#
+# put session in trace mode
+# Usage :  traceon <sid> 
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+if [ $# -lt 1 ]
+then
+        echo "Usage : $0 <instance name> [PID]"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+
+export SID=$1
+export PID=$2   ## optional
+export SERIAL=$3  ## optional, if used, then SESSION ID is $PID $SERIAL, else PID is unix PID
+
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  ORACLE_HOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+export  ORA_DUMP="/"$(echo $ORACLE_HOME | cut -f2 -d'/')"/dump/$SID"
+
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID}"
+        export VAR2="$ORACLE_HOME/bin/svrmgrl <<EOF >&/dev/null"
+else
+        export VAR="ORACLE_SID=${SID};export ORACLE_SID"
+        export VAR2="$ORACLE_HOME/bin/svrmgrl <<EOF 1>/dev/null 2>&1"
+fi
+
+export SESSION=v'\$'session
+export PROCESS=v'\$'process
+export MYSTAT=v'\$'mystat
+
+## Get the session list: all sessions except mine or the PID's unique session
+if [ -z "$PID" ]
+then
+   # PID is not defined, select all sessions exept mine
+   FILTER="and S.Sid <> (select distinct M.sid from $MYSTAT M)"
+   LMARK=""
+else
+   if [ -z "$SERIAL" ]
+   then
+      # PID is defined, select only 1 session
+      FILTER="and P.spid='$PID'"
+      LMARK="' LINE ' as tag,"
+   else
+      #SERIAL=$SERIAL # $3
+      SIDNO=$PID
+      CMD1=exit
+   fi
+fi
+su - $USER -c "
+$CMD1
+$VAR
+$VAR2
+connect internal
+spool /tmp/`basename $0`.log
+select $LMARK S.sid,S.serial#,P.spid,S.osuser,substr(S.username,1,15)"USERNAME",S.machine from $PROCESS P,$SESSION S
+where P.addr=S.paddr
+-- and S.serial# <>1
+ $FILTER ;
+spool off
+exit;
+EOF
+" 1>/dev/null 2>&1
+
+if [ -z "$PID" ]
+then
+   echo "			List of current sessions"
+   echo "			========================\n"
+   cat /tmp/`basename $0`.log
+
+   echo "Please enter SID no : \c"
+   read SIDNO
+   echo "Please enter SERIAL# : \c"
+   read SERIAL
+else
+   if [ -z "$SERIAL" ]
+   then
+      SIDNO=$(grep ' LINE ' /tmp/`basename $0`.log | grep " $PID "|awk '{print $2}')
+      SERIAL=$(grep ' LINE ' /tmp/`basename $0`.log | grep " $PID "|awk '{print $3}')
+   fi
+   echo "\t Setting trace ON for process $PID having SESSION ID: $SIDNO $SERIAL "
+   # WARNING: the format below is used by mon*
+   echo "          $SIDNO $SERIAL $PID $(basename $0) $ORA_DUMP (formatted id)\n"
+fi
+
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID}"
+        export VAR2="$ORACLE_HOME/bin/svrmgrl <<EOF >&/dev/null"
+else
+        export VAR="ORACLE_SID=${SID};export ORACLE_SID"
+        export VAR2="$ORACLE_HOME/bin/svrmgrl <<EOF 1>/dev/null 2>&1"
+fi
+
+su - $USER -c "
+$VAR
+$VAR2
+connect internal
+spool /tmp/`basename $0`.log
+execute dbms_system.set_sql_trace_in_session(${SIDNO},${SERIAL},TRUE);
+spool off
+exit;
+EOF
+" 1>/dev/null 2>&1
+
+cat /tmp/`basename $0`.log
+rm /tmp/`basename $0`.log

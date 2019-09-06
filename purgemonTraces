@@ -1,0 +1,61 @@
+#!/bin/ksh
+# Stopping session traces when needed and purge associated trace files in oracle dump dest dir
+# version without loop: does one purge cycle and stops
+# called from mon* scripts
+#
+
+. $(dirname $0)/IamAdbTool.env
+
+if [ $# -lt 2 ]
+then
+   echo "\n\tUsage: $MAIN instance monitor-logfile [trc max size]"
+   echo "\t     Stopping session traces when needed and purge associated trace files in oracle dump dest dir"
+   echo "\t     monitor-logfile: file to takes the PIDs from"
+   echo "\t     trc max size   : 512 * max_dump_file_size of oracle"
+   echo
+   exit 1
+fi
+DB=$1
+TRACEFILE=$2
+DUMPMAX=$3
+WORKDIR=$(dirname $TRACEFILE)
+# set default value for max dump file size
+if [ -z "$DUMPMAX" ]
+then
+   # DUMPMAX=20480055 		# old value in dwh
+   DUMPMAX=$((20480055 * 2))
+fi
+
+   # cleaning-up traces from this monitor to avoid filling oracle dump filesystem
+   grep " setTraceon" $TRACEFILE |while read SID SERIAL PID SCRIPT ORA_DUMP Restofline
+   do
+      # find conditions when the trace should be stopped and the trace file moved+compressed
+      STOPTRACE=N
+      if [ -f $ORA_DUMP/ora_$PID.trc ]
+      then
+         if (ps -fp $PID > /dev/null)
+         then
+            # if the trace file reached 20M (dwh max_dump_file_size), stop the trace
+            if [ $(ll $ORA_DUMP/ora_$PID.trc |awk '{print $5}') -ge $DUMPMAX ]
+            then
+               echo "Found max-size file:"
+               ll $ORA_DUMP/ora_$PID.trc
+               STOPTRACE=Y
+            fi
+         else
+            # if the traced process does not run anymore, stop the trace
+            echo "Process $PID finished"
+            STOPTRACE=Y
+         fi
+      fi
+      # stop the session trace, move it to a bigger filesystem, compress
+      # except if already done (trace file already absent from oracle dump dir)
+      if [ "$STOPTRACE" = "Y" ]
+      then
+            setTraceoff $DB $SID $SERIAL
+            mv $ORA_DUMP/ora_$PID.trc $WORKDIR
+            gzip $WORKDIR/ora_$PID.trc
+      fi
+   done
+
+# end of script

@@ -1,0 +1,58 @@
+#!/usr/bin/ksh
+
+if [ $# -lt 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        exit 1
+fi
+if grep -q "^$1:" /etc/ORATAB 
+then
+	:
+else
+       echo "Instance <$1> not found "
+       cat /etc/ORATAB
+       exit 1
+fi
+
+export SID=$1
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        export VAR="sqlplus -s internal"
+        export VAR5="set lines 500"
+else
+        export VAR="sqlplus \"/ as sysdba \" "
+        export VAR5="set lines 500"
+fi
+
+system_event=v'\$'system_event
+su - $USER -c "
+$VAR  <<EOF
+$VAR5
+set pages 66
+set serveroutput on
+create table begin_sys_event as select * from $system_event;
+exit
+EOF
+"
+sleep 5
+
+su - $USER -c "
+$VAR  <<EOF
+$VAR5
+set pages 66
+set serveroutput on
+column event format a30
+create table end_sys_event as select * from $system_event;
+select b.event, (e.total_waits-b.total_waits) "waits",
+	(e.total_timeouts-b.total_timeouts) "timeouts",
+	(e.time_waited-b.time_waited) "time_waited",
+	(e.average_wait-b.average_wait) "average_wait"
+from begin_sys_event b, end_sys_event e where b.event=e.event;
+drop table begin_sys_event;
+drop table end_sys_event;
+exit
+EOF
+"

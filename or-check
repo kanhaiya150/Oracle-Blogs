@@ -1,0 +1,48 @@
+#!/usr/bin/ksh
+# Script intended to check oracle structure
+# Low frequency
+#
+# Usage : $0 monitor_name
+#
+# Returns different values according to the object (ITO 4 functionality)
+#
+
+if [ -s /etc/PATH ]
+then export PATH=$PATH:`cat /etc/PATH`
+fi
+
+
+##########################################################################
+# Check if there is any oracle object having max extents greater than
+# max free chunk available
+
+# scans Oracle config by reading each line of /etc/ORATAB
+if [ -s /etc/ORATAB ]
+then
+     IFS=:
+     grep -v -e "^#" -e "^$" /etc/ORATAB|grep -v "^ST[A-Z]:"|while read SID ORACLE_HOME FLAG USER
+     do
+	if  ps -ef |grep -v grep |grep -q ora_.*_$SID
+	then
+	unset IFS
+
+	/usr/local/oracle/nextext $SID |awk '{while (match($0,"^------------------.*")==0) {getline};		
+					      while (getline) {printf "%s %s %s %s %s\n",$1,$2,$3,$4,$5};
+					     }'|while read TSN OBJN OBJT NEXTEX MAXCHU
+	do
+		opcmon $1=1                 \
+                     -object next_ext       \
+                     -option TSN=$TSN       \
+                     -option SID=$SID       \
+                     -option OBJN=$OBJN     \
+                     -option OBJT=$OBJT     \
+                     -option NEXTEX=$NEXTEX \
+                     -option MAXCHU=$MAXCHU
+	done
+	IFS=:
+     fi
+     done
+fi
+
+# returns 0 (ALL is OK) at the end
+opcmon "$1=0"

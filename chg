@@ -1,0 +1,12 @@
+#!/usr/bin/ksh
+#
+#
+#
+for host in {list of hosts space separated}
+
+do
+	echo $host
+	rcp chg_passwd $host:/tmp
+	remsh $host -n "/tmp/chg_passwd"
+	remsh $host -n "rm /tmp/chg_passwd"
+done

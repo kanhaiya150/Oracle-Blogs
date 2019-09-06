@@ -1,0 +1,131 @@
+# wait status of all sessions
+# Usage :  waistat <SID>
+
+OSTYPE=$(uname -s)
+if [ $OSTYPE = "AIX" ]
+then 
+  alias bdf="/usr/bin/df -Ik"
+  alias ll="/usr/bin/ls -l"
+fi
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+
+alter session set nls_date_format='DD-MON-YYYY HH24:MI:SS';
+set datewidth 20
+spool /tmp/`basename $0`.log
+select timestamp,seconds_in_wait,sid,osuser,username,sql_text
+from captured_session_waits
+order by timestamp,sid,piece
+/
+spool off
+exit
+EOF
+"
+old_timestamp_d=""
+old_timestamp_h=""
+old_sid=""
+timestamp_d="    DATE   "
+timestamp_h="  TIME  "
+seconds_in_wait="SECONDS WAIT"
+sid="SID"
+osuser="  OSUSER  "
+username="    USERNAME   "
+sql_text="                        SQL TEXT                                "
+echo "$timestamp_d" "$timestamp_h" "$seconds_in_wait" "$sid" "$osuser" "$username" "$sql_text"
+timestamp_d="-----------"
+timestamp_h="--------"
+seconds_in_wait="------------"
+sid="---"
+osuser="----------"
+username="---------------"
+sql_text="----------------------------------------------------------------"
+echo "$timestamp_d" "$timestamp_h" "$seconds_in_wait" "$sid" "$osuser" "$username" "$sql_text"
+grep -v -e "^TIMESTAMP" -e "^---------" -e "row[s]* *select" /tmp/`basename $0`.log|while read timestamp_d timestamp_h seconds_in_wait sid osuser username sql_text
+do
+	if [ "$timestamp_d" = "$old_timestamp_d" -a "$timestamp_h" = "$old_timestamp_h" -a "$sid" = "$old_sid" ]
+	then
+		timestamp_d=" "
+		timestamp_h=" "
+		seconds_in_wait=""
+		sid=" "
+		osuser=" "
+		username=" "
+	else
+		old_timestamp_d=$timestamp_d
+		old_timestamp_h=$timestamp_h
+		old_sid=$sid
+	fi
+		typeset -L11 timestamp_d
+		typeset -L8 timestamp_h	
+		typeset -R12 seconds_in_wait
+		typeset -L3 sid
+		typeset -L10 osuser
+		typeset -L15 username
+		echo "$timestamp_d" "$timestamp_h" "$seconds_in_wait" "$sid" "$osuser" "$username" "$sql_text"
+done
+rm /tmp/`basename $0`.log

@@ -1,0 +1,71 @@
+#!/usr/bin/ksh
+#
+# Script intended to check if there is session > 60 minutes
+# only for midas session
+#
+# Usage : $0
+# It returns the amount of cpu time + PID
+#
+#
+
+# by PPo: In order to get a log of this script
+exec 1>/tmp/`basename $0`.log 2>&1; date; set -x
+# by PPo: In order to set a TIMEOUT for the script
+#TIMEOUT=300; PID=$$; (sleep $TIMEOUT; kill $PID)&
+
+
+OSTYPE=$(uname -s)
+if [ $OSTYPE = "AIX" ]
+then 
+  alias bdf="/usr/bin/df -Ik"
+  alias ll="/usr/bin/ls -l"
+fi
+
+if [ -s /etc/PATH ]
+then export PATH=$PATH:`cat /etc/PATH`
+fi
+
+PB=0
+
+
+if [ -s /etc/ORATAB ]
+then
+    IFS=:
+    grep -v -e "^#" -e "^$" /etc/ORATAB|grep -v "^ST[A-Z]:"|grep -v ^B2B:|while read SID ORACLE_HOME FLAG USER VG
+    do
+	unset IFS
+
+        LOG=$ORACLE_HOME/`basename $0`.log  # extension .log for svrmgrl
+
+	if ps -ef |grep "oracle${SID} "|grep -vq grep 
+	then
+		ps -ef |grep "oracle${SID} "|grep -v grep |awk '{if (match(substr($8,1,6),"oracle")) {print $2" "$7} else {print $2" "$8}}'|while read PID TIME
+		do
+			if [ `echo $TIME|awk -F: '{print $1}'` -gt 60 ]
+			then
+                                PB=1
+                        	opcmon `basename $0`=$TIME                                   \
+                                                 -object sessionop                           \
+                                                 -option SID=$SID -option PID=$PID
+                        	opcmon `basename $0`=$TIME                                   \
+                                                 -object sessiondba                          \
+                                                 -option SID=$SID -option PID=$PID
+			fi
+		done
+	fi
+        rm -f $LOG
+	IFS=:
+    done
+        
+    unset IFS
+fi
+
+# to send a value of 0, if nothing has to be checked or everything works fine
+# Otherwise ITO will display "can't retrieve value ..."
+
+# by PPo: In order to kill the TIMEOUT killer process of the script
+#kill %1         # kill 1st job
+
+if [ $PB != "1" ]
+then opcmon `basename $0`=0
+fi

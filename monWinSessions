@@ -1,0 +1,97 @@
+#!/bin/ksh
+#
+
+if [ $# -lt 3 ]
+then
+   echo "\n\tUsage: $(basename $0) <instance> <minutes-interval> <minutes-total> [<workdir> | test]"
+   echo "\t     detect and trace sessions coming from NT/w2k and lasting over <minutes-interval> minutes"
+   echo "\t     minutes-interval: is also the polling interval"
+   echo "\t     minutes-total: the monitor runs appx minutes-total minutes and stops"
+   echo "\t     workdir: directory to put main trace + list of traced sessions + finished trace files"
+   echo "\t              default is /log_recv/oracleTrace/<date> or /LOG_RECV/oracleTrace/<date>"
+   echo "\t              main trace is <workdir>/$(basename $0).log"
+   echo "\t              list of traced sessions is <workdir>/list"
+   echo "\t              finished trace files are ora_PID.trc.gz and come from /oracle/dump/"
+   echo "\t     'test' keyword: to run in test mode "
+   echo "\t             (test mode just tells if trace is needed and build main trace in /tmp/oracleTrace)"
+   echo "\t NOTE that list of traced sessions should be shared with any other running tool => use the same <workdir>"
+   echo
+   exit 1
+fi
+
+# Loading environment and checking instance name in $1
+. $(dirname $0)/IamAdbTool.env
+
+DB=$1
+MINUTES=$2
+DURATION=$3
+OPTION=$4
+MAIN=$(basename $0)
+if [ -z "$OPTION" ]
+then
+   # set default value : a directory out of / filesystem
+   if [ -d /log_recv ]
+   then
+      WORKDIR=/log_recv/oracleTrace
+   else
+      if [ -d /LOG_RECV ]
+      then
+         WORKDIR=/LOG_RECV/oracleTrace
+      fi
+   fi
+else
+   # if parameter indicates test mode, setup test mode and trace under /tmp,
+   # else keep and use the specified WORKDIR as root trace directory
+   if [ "$OPTION" = "test" ]
+   then
+      TESTMODE=yes
+      WORKDIR=/tmp/oracleTrace
+   else
+      WORKDIR=$OPTION
+   fi
+fi
+# trace directories by day are generated under root trace directories
+WORKDIR=$WORKDIR/$(date +%d%b)   ## makes names like 23nov, 03Dec (it was 'nov' for nov but Dec,Jan,... later)
+mkdir -p $WORKDIR
+LISTFILE=$WORKDIR/list
+touch $LISTFILE
+TRACEFILE=$WORKDIR/$MAIN.log
+
+echo "\n\tMain trace will be in $TRACEFILE"
+echo "\tList of session ids will be in $LISTFILE\n"
+DONE=0
+while [ $DONE -lt $DURATION ]
+do
+   process $DB -search $MINUTES |grep -e 'C:' -e 'D:' | awk '{print $2,$3,$4}' | while read SID SERIAL PID
+   do
+      if [ -z "$SERIAL" ]
+      then
+         echo "PB in $0 : no session id found"
+         exit 1
+      fi
+      if (grep "^$SID $SERIAL " $LISTFILE > /dev/null)
+      then :
+      else
+         if [ -z "$TESTMODE" ]
+         then
+            # setTraceon $DB $SID $SERIAL >> $TRACEFILE
+            # prev line replaced to give the right info in TRACEFILE, setTraceon should be optimized
+            setTraceon $DB $PID >> $TRACEFILE
+            parents " $PID " >> $TRACEFILE
+            # replaced by the next line: infoproc $PID >> $TRACEFILE
+            session $DB " and sid=$SID " >> $TRACEFILE
+            echo "$SID $SERIAL $PID" |tee -a $LISTFILE
+         else
+            echo "$SID $SERIAL (PID=$PID) should be traced"
+         fi
+      fi
+   done
+   if [ -z "$TESTMODE" ]
+   then
+      # cleaning-up traces from this monitor to avoid filling oracle dump filesystem
+      purgemonTraces $DB $TRACEFILE
+   fi
+
+   DONE=$(($DONE + $MINUTES))
+   sleep $(( $MINUTES * 60 ))
+done

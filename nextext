@@ -1,0 +1,143 @@
+#!/usr/bin/ksh
+#
+# next extent > max freespace
+# Usage :  nextext <SID>
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias ll="ls -l" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full"
+	exit 1
+fi
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+export FILEXT=filext'\$'
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+spool /tmp/`basename $0`.$$.log
+Select A.tablespace_name, A.owner||'.'||A.segment_name \"OBJECT_TYPE\", A.segment_type, A.next_extent/1024 \"NEXT_EXTENT\",
+   max(B.bytes)/1024 \"MAX CHUNK\"
+   from sys.dba_segments A , sys.dba_free_space B
+   where A.tablespace_name = B.tablespace_name
+   and owner not in ('SYS', 'SYSTEM')
+   and A.tablespace_name not in (
+	select d.tablespace_name from $FILEXT F,dba_data_files d where f.file#=D.file_id
+                                )
+   group by A.tablespace_name, A.owner, A.segment_name, A.segment_type, A.next_extent/1024
+   having A.next_extent/1024 > max(B.bytes)/1024
+/
+spool off
+exit
+EOF
+" >/dev/null
+
+# case filext$ does not exist : no tablespace in autoextend mode
+
+if grep -q ORA-00942 /tmp/`basename $0`.$$.log 
+then
+	su - $USER -c "
+	$VAR
+	rm -f /tmp/`basename $0`.$$.log
+	$VAR2
+	$VAR4
+	$VAR5
+spool /tmp/`basename $0`.$$.log
+Select A.tablespace_name, A.owner||'.'||A.segment_name \"OBJECT_TYPE\", A.segment_type, A.next_extent/1024 \"NEXT_EXTENT\",
+   max(B.bytes)/1024 \"MAX CHUNK\"
+   from sys.dba_segments A , sys.dba_free_space B
+   where A.tablespace_name = B.tablespace_name
+   and owner not in ('SYS', 'SYSTEM')
+   group by A.tablespace_name, A.owner, A.segment_name, A.segment_type, A.next_extent/1024
+   having A.next_extent/1024 > max(B.bytes)/1024
+/
+spool off
+exit
+EOF
+" >/dev/null
+fi
+
+echo "			Objects having next extent greater than max free chunk"
+echo "			------------------------------------------------------\n\n"
+
+if grep -q "^-------------" /tmp/`basename $0`.$$.log
+then
+
+	grep -v rows /tmp/`basename $0`.$$.log|while read TN SN ST NE MX
+	do
+		typeset -L20 TN
+		typeset -L30 SN
+		typeset -L12 ST
+		typeset -R11 NE
+		typeset -R10 NX
+		echo "$TN	$SN	$ST	$NE	$MX"
+	done 
+	rm -f /tmp/`basename $0`.$$.log
+else
+        echo "-------------------"
+fi

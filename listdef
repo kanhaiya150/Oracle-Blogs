@@ -1,0 +1,96 @@
+#!/bin/ksh
+# list of scheduled jobs
+# Usage :  listdef <SID>
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" 
+         alias awk="/usr/xpg4/bin/awk" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias grep="/bin/egrep" 
+         alias ll="ls -l" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "Must be launched by root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "FileSystem /tmp is full "
+	exit 1
+fi
+
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+alter session set nls_date_format='DD-MON-YYYY HH24:MI:SS';
+set datewidth 20
+set charwidth 95
+spool /tmp/`basename $0`$$.log
+select * from deferror
+/
+spool off
+exit
+EOF
+"
+echo "                  List of errors in deferror table"
+echo "                  ================================\n"
+more /tmp/`basename $0`$$.log
+rm /tmp/`basename $0`$$.log

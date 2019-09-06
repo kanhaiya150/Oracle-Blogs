@@ -1,0 +1,64 @@
+#!/usr/bin/ksh
+#
+# Script intended to check date on oracle
+#
+#
+#
+
+OSTYPE=$(uname -s)
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+if [ -s /etc/ORATAB ]
+then
+    IFS=:
+    grep -v "^#" /etc/ORATAB|while read SID OHOME FLAG USER VG
+    do
+
+	if [ -x $OHOME/bin/svrmgrl ]
+	then
+       		 VAR3=svrmgrl
+       		 export VAR4="connect internal"
+	else
+       		 VAR3="sqlplus -s  \"/ as sysdba \" "
+       		 export VAR4="set wrap off"
+       		 export VAR5="set lines 500"
+	fi
+        ## csh or ksh
+	if grep "^$USER:" /etc/passwd|grep csh$
+	then
+		export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+		export VAR2=" $OHOME/bin/$VAR3 <<EOF "
+	else
+		export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+		export VAR2="$OHOME/bin/$VAR3 <<EOF "
+	fi
+
+        ##
+	if ps -ef |grep " ora_.*_$SID$"|grep -qv grep # If oracle is running
+	then
+		echo "\n\n=============> Date for SID : $SID"
+        	su - $USER -c "
+        	$VAR
+        	$VAR2
+        	$VAR4
+        	$VAR5
+		alter session set nls_date_format='DD-MON-YYYY';
+  		set datewidth 12
+  		select sysdate from dual;
+        	exit;
+EOF
+        	" |grep -v ^$|grep -v SVRMGR|grep -v ^Oracl|grep -v ^PL|grep -v Copyr|grep -v With|grep -v "row se"
+	IFS=:
+	fi
+    done
+        
+    unset IFS
+fi

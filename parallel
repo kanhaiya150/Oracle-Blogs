@@ -1,0 +1,115 @@
+#
+# Parallel processess
+# Usage :  parallel <SID>
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3="sqlplus -s internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+export SESSIONWAIT=v'\$'session_wait
+export SESSION=v'\$'session
+export PX_SESSION=v'\$'px_session
+
+su - $USER -c "
+$VAR
+$VAR2
+set wrap off
+set lines 160
+set pages 100 
+
+col username for a12 
+col \"QC SID\" for A6 
+col SID for A6 
+col \"QC/Slave\" for A10 
+col \"Requested DOP\" for 9999 
+col \"Actual DOP\" for 9999 
+col \"slave set\" for A10 
+
+spool /tmp/`basename $0`.log
+select 
+decode(px.qcinst_id,NULL,username, 
+' - '||lower(substr(s.program,length(s.program)-4,4) ) ) \"Username\", 
+decode(px.qcinst_id,NULL, 'QC', '(Slave)') \"QC/Slave\" , 
+to_char( px.server_set) \"Slave Set\", 
+to_char(s.sid) \"SID\", 
+decode(px.qcinst_id, NULL ,to_char(s.sid) ,px.qcsid) \"QC SID\", 
+px.req_degree \"Requested DOP\", 
+px.degree \"Actual DOP\" 
+from 
+$PX_SESSION px, 
+$SESSION s 
+where 
+px.sid=s.sid (+) 
+and 
+px.serial#=s.serial# 
+order by 5 , 1 desc 
+/ 
+spool off
+exit
+EOF
+"
+pg /tmp/`basename $0`.log
+rm /tmp/`basename $0`.log

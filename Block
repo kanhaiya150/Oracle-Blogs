@@ -1,0 +1,253 @@
+# -----------------------------------------------------------------------------
+#
+# This job list existing locked sessions and locker sessions
+#
+# -----------------------------------------------------------------------------
+#
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias ll="ls -l" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+set -e
+# set -x
+ 
+export DIR=/usr/local/oracle
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full"
+	exit 1
+fi
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 150"
+        export VAR6="column waiting_session format a15"
+fi
+
+export SQLSCRIPT_DEG="$DIR/loc_deg.sql"
+
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >/dev/null "
+fi
+
+##
+export LOCK=v'\$'locked_object
+export OBJ=obj'\$'
+export SESSION=v'\$'session
+export NUM=$$
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+$VAR6
+rem set pages 100
+set echo off
+set termout off
+col machine format a20; 
+col lock_type format a10; 
+spool /tmp/$USER.`basename $0`$$.log
+drop table lock_holders${NUM};
+
+create table LOCK_HOLDERS${NUM}
+(
+  waiting_session   number,
+  holding_session   number,
+  lock_type         varchar2(26),
+  mode_held         varchar2(14),
+  mode_requested    varchar2(14),
+  lock_id1          varchar2(22),
+  lock_id2          varchar2(22)
+) nologging;
+
+drop   table dba_locks_temp${NUM};
+create table dba_locks_temp${NUM}  nologging as select * from dba_locks;
+
+insert into lock_holders${NUM} 
+select w.session_id,
+        h.session_id,
+        w.lock_type,
+        h.mode_held,
+        w.mode_requested,
+        w.lock_id1,
+        w.lock_id2
+  from dba_locks_temp${NUM} w, dba_locks_temp${NUM} h
+where h.mode_held      !=  'None'
+  and  h.mode_held      !=  'Null'
+  and  w.mode_requested !=  'None'
+  and  w.lock_type       =  h.lock_type
+  and  w.lock_id1        =  h.lock_id1
+  and  w.lock_id2        =  h.lock_id2;
+
+commit;
+drop table dba_locks_temp${NUM};
+
+insert into lock_holders${NUM} 
+  select holding_session, null, 'None', null, null, null, null
+    from lock_holders${NUM} 
+ minus
+  select waiting_session, null, 'None', null, null, null, null
+    from lock_holders${NUM};
+commit;
+
+drop table sortie${NUM};
+create table sortie${NUM}
+(
+ waiting_session   number,
+  holding_session   number,
+  lock_id1          varchar2(22),
+  lock_id2          varchar2(22),
+  lock_type         varchar2(26),
+  mode_held         varchar2(14),
+  mode_requested    varchar2(14),
+  username	    varchar2(30),
+  osuser            varchar2(15),
+  process           varchar2(9),
+  machine           varchar2(64),
+  object_name       varchar2(30),
+  object_id         number
+) nologging ;
+
+insert into sortie${NUM}
+select  L.waiting_session,
+        L.holding_session,
+	L.lock_id1,
+	L.lock_id2,
+	L.lock_type,
+	L.mode_held,
+	L.mode_requested,
+	S.username,
+	S.osuser,
+	S.process,
+	S.machine,
+	N.name,
+	O.object_id
+ from lock_holders${NUM} L, $SESSION S, $LOCK O, $OBJ N
+where L.waiting_session = S.SID
+and S.SID=O.session_id
+and O.object_id=N.obj#
+;
+commit;
+
+select  lpad(' ',3*(level-1)) || waiting_session waiting_session,
+	lock_type,
+	mode_requested,
+	mode_held,
+	process,
+	osuser,
+	machine,
+	username,
+	object_name
+ from sortie${NUM}
+connect by  prior waiting_session = holding_session
+  start with holding_session is null;
+
+drop table lock_holders${NUM};
+drop table sortie${NUM};
+spool off
+exit
+EOF
+" 
+
+NBLOCK=`grep rows /tmp/$USER.\`basename $0\`$$.log|tail -1|awk '{print$1}'`
+if [ $NBLOCK = "no" ]
+then
+	NBLOCK=0
+fi
+
+if grep "ORA-" /tmp/$USER.`basename $0`$$.log|grep -v "ORA-00942" 1>/dev/null 2>&1
+then
+        echo "\n\n WARNING !!!!!!!!!!!!!!!! Oracle error \n\n"
+        cat /tmp/$USER.`basename $0`$$.log
+	rm /tmp/$USER.`basename $0`$$.log
+	echo "\n\n\n I will use degraded mode ................"
+	su - $USER -c "
+$VAR
+$VAR2
+set echo off
+set termout off
+spool /tmp/$USER.`basename $0`$$.log
+@${SQLSCRIPT_DEG}
+spool off
+exit
+EOF
+" 
+	cat /tmp/$USER.`basename $0`$$.log
+	rm /tmp/$USER.`basename $0`$$.log
+else
+	if grep -q WAITING_SESSIO /tmp/$USER.`basename $0`$$.log
+	then
+		ed -s /tmp/$USER.`basename $0`$$.log <<EOF 1>/dev/null 2>&1
+/WAITING_SESSIO
+-1
+1,.d
+/rows
+.,$ d
+w
+q
+EOF
+	fi
+	if [ ${NBLOCK} -ne 0 ]
+	then
+		echo "\n\nWARNING !!!!!!!!!!!!!!! NB locks :  $NBLOCK\n\n"
+		cat /tmp/$USER.`basename $0`$$.log
+		rm /tmp/$USER.`basename $0`$$.log
+	else
+		echo "\n\nNo blocking locks\n\n"
+		rm /tmp/$USER.`basename $0`$$.log
+	fi
+fi

@@ -1,0 +1,87 @@
+#!/bin/ksh
+#
+#
+# object: this script runs a pl/sql to list or rebuild indexes
+#	
+#	for all indexes not belonging to sys%
+#	. analyse validate structure
+#	. if deleted_leaves / leaves > 30 %
+#		list or rebuild index
+#
+
+if [ $# -lt 1 ]
+then
+        echo "Usage : $0 <instance name>" [list/rebuild]
+	echo default is list
+        exit 1
+fi
+if grep -q "^$1:" /etc/ORATAB
+then
+        :
+else
+       echo "Instance <$1> not found "
+       exit 1
+fi
+if [ "$2" = "" ]
+then
+	export ARG=list
+else
+	export ARG=$2
+fi
+export SID=$1
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+
+su - $USER -c "
+sqlplus -s \"/ as sysdba\" << EOF
+show  error
+whenever sqlerror exit failure;
+set serveroutput on size 50000
+-- authid current_user
+declare
+	$ARG	varchar2(10) := '$ARG';
+	t_sql	varchar2(1000);
+	idx	varchar2(30);
+	own	varchar2(30);
+	rat	number(10,2);  	-- ratio deleted_leaves/leaves
+	nba	number;		-- analyzed indexes
+	nbr	number;		-- rebuilt indexes
+	cursor get_index_name IS select owner, index_name from dba_indexes
+		where owner not like 'SYS%' and owner <> 'OUTLN' ;
+	cursor get_part IS select partition_name from dba_ind_partitions where index_owner=own
+		and index_name= idx ; 
+	part   get_part%ROWTYPE;
+begin
+	dbms_output.put_line('scattered_idx '||$ARG);
+	nba := 0;
+	nbr := 0;
+	for item IN get_index_name
+	loop
+		own := item.owner;
+		nba := nba + 1 ;
+		idx := item.index_name;
+                t_sql := 'analyze index '||own||'.'||chr(34)||idx||chr(34)||' validate structure'  ;
+                execute immediate t_sql ;
+                select del_lf_rows/(1+lf_rows) into rat from index_stats ;
+		if rat > 0.3 then
+		  dbms_output.put_line('index: '||own||'.'||idx||' del_lf_rows/lf_rows=' || rat);
+		  nbr := nbr + 1 ;
+		  t_sql := 'alter index ' || own ||'.'||idx || ' rebuild nologging';
+		  if $ARG = 'rebuild' then
+		 	 execute immediate t_sql;
+		  end if ;
+		  for part in get_part
+		  loop
+		  	t_sql := 'alter index ' || own ||'.'||idx || ' rebuild ';
+			t_sql := t_sql||' partition '||part.partition_name||' nologging';
+			dbms_output.put_line( t_sql );
+		  	if $ARG = 'rebuild' then
+		  		 execute immediate t_sql;
+		  	end if ;
+		  end loop;
+		end if;
+  	end loop;
+dbms_output.put_line('analyzed indexes=' || nba || ' rebuild indexes=' || nbr);
+end;
+/
+EOF
+"

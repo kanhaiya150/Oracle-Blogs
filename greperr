@@ -1,0 +1,20 @@
+# this script compute Hit ratio average of all oracle databases
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+mv  /tmp/`basename $0`.trc /tmp/`basename $0`.trc.$$
+for i in {space separated list of hosts}
+
+do
+	echo $i
+	remsh $i "grep ^ORA- /etc/oracle_alert.log"  >>/tmp/`basename $0`.trc
+done
+pg /tmp/`basename $0`.trc

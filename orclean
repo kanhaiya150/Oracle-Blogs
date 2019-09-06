@@ -1,0 +1,55 @@
+#!/usr/bin/ksh
+#
+# object: clean oracle trace, aud, core
+# Usage :  or-clean.sh 
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias awk="/usr/xpg4/bin/awk"
+         alias grep="/usr/xpg4/bin/grep" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias ll="ls -l" ;;
+esac
+
+export servout=/tmp/servout.log
+
+##
+cln ()
+{
+> $servout
+chmod 777 $servout
+su $USER -c "
+sqlplus /nolog << EOF |grep 'rep='|sed 's@?@$ORACLE_HOME@' >$servout
+connect / as sysdba
+rem set wrap off
+select 'rep='||value from $PARAMETER where name='$1'
+/
+EOF
+"
+eval `cat $servout`
+#rep=`cat $servout|awk -F= '{print $2}'`
+set -x
+find $rep -name '*trc'  -mtime +1 -exec rm {} \;
+find $rep -name "*aud"  -mtime +0 -exec rm {} \;
+find $rep -name "core*" -mtime +1 -exec rm -r {} \;
+set +x
+}
+
+IFS=:
+cat /etc/ORATAB|grep -v '^#'|\
+while read ORACLE_SID ORACLE_HOME FLAG USER BACKDIR
+do
+	export ORACLE_SID ORACLE_HOME FLAG USER BACKDIR rep
+	PARAMETER=v'\$'parameter
+	PATH=$ORACLE_HOME/bin:$PATH
+        cln background_dump_dest
+        cln user_dump_dest
+        cln core_dump_dest
+        cln audit_file_dest
+done
+
+rm $servout

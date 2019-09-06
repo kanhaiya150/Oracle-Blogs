@@ -1,0 +1,67 @@
+#!/usr/bin/ksh
+# find all parents process of a given unix process
+# selected from its name or pid or username
+#
+# Arguments: see Usage string below
+#
+# To be run under any user
+# Subprograms required: none
+#
+#
+
+getParents ()
+{
+   PIDLIST=$1
+   # GLOBLIST=$2
+   START=$3
+   if [ -n "$START" ]
+   then
+      # display header
+      ps -f |head -1
+   fi
+   for LPID in $(echo $PIDLIST|sed 's/,/ /g')
+   do
+      # save the pid in a global list for final status
+      GLOBLIST="$GLOBLIST$LPID,"
+      # echo the list of parent processes in 1-word format pid1,pid2,...
+      CPIDLIST=$(ps -fp $LPID|tail -1 | awk '{print $3}'|xargs|sed 's/ /,/g')
+      if [ "$CPIDLIST" = "1" ]
+      then
+         echo "End of list $GLOBLIST"
+      else
+         # echo "Parents:"
+         ps -fp $CPIDLIST | grep -v COMMAND
+         getParents $CPIDLIST
+      fi
+   done
+}
+
+# main
+if [ $# -lt 1 ]
+then
+   echo "\n\tUsage: $0 process-match [username] "
+   echo "\tDesc : Listing a process and all its parents or children"
+   echo "\tprocess-match: PID or program name to grep in ps -ef"
+   echo "\t-s: to get only a PID list in output (implemented in parents.ksh)"
+   echo
+   exit 1
+fi
+PMATCH="$1"
+USER=$2
+if [ -n "$USER" ]
+then
+   OPTS="-u $USER"
+else
+   OPTS="-e"
+fi
+GLOBLIST=""
+echo "Children:"
+ps $OPTS -f | grep "$PMATCH" | grep -v -e $0 -e grep
+MPIDLIST="$(ps $OPTS -f | grep "$PMATCH" | grep -v -e $0 -e grep|awk '{print $2}')"
+for MPID in $MPIDLIST
+do
+   echo "Child: $MPID"
+   # GLOBLIST="$GLOBLIST$MPID,"
+   # echo "Child: $MPID $(ps -fp $MPID|tail -1|cut -c 48-)"
+   getParents $MPID "$GLOBLIST" start
+done

@@ -1,0 +1,89 @@
+#!/usr/bin/ksh
+#
+#
+# Script intended to check borkn jobs
+#
+# Usage : $0
+# It returns the number of broken jobs
+#
+#
+
+# by PPo: In order to get a log of this script
+exec 1>/tmp/`basename $0`.log 2>&1; date; set -x
+# by PPo: In order to set a TIMEOUT for the script
+TIMEOUT=300; PID=$$; (sleep $TIMEOUT; kill $PID)&
+
+
+if [ -s /etc/PATH ]
+then export PATH=$PATH:`cat /etc/PATH`
+fi
+
+PB=0
+
+
+if [ -s /etc/ORATAB ]
+then
+    IFS=:
+    grep -v -e "^#" -e "^$" /etc/ORATAB|while read SID ORACLE_HOME FLAG USER
+    do
+
+        LOG=$ORACLE_HOME/`basename $0`.log  # extension .log for svrmgrl
+
+        ## svrmgrl or sqldba
+    
+        if [[ -x $ORACLE_HOME/bin/svrmgrl ]]
+        then
+        	SQLMGR=svrmgrl
+        else 
+                : # ORACLE_HOME non existent or empty
+        fi
+
+        ## csh or ksh
+	if grep "^$USER:" /etc/passwd|grep csh$
+	then
+		export VAR="setenv ORACLE_SID ${SID}"
+		export VAR2=" $ORACLE_HOME/bin/$SQLMGR <<EOF >&/dev/null"
+	else
+		export VAR="ORACLE_SID=${SID};export ORACLE_SID"
+		export VAR2="$ORACLE_HOME/bin/$SQLMGR <<EOF 1>/dev/null 2>&1"
+	fi
+
+        ##
+       	su - $USER -c "
+       	$VAR
+       	$VAR2
+       	spool $LOG
+       	connect internal
+SELECT count(*) FROM dba_jobs WHERE BROKEN='Y'
+/
+spool off
+exit
+EOF
+"
+	if grep -q "ORA-"  $LOG
+	then
+		# Oracle not available or other pb
+		:
+	else
+	  	unset IFS
+		JOBS=`echo \`grep -v "selected" $LOG|grep [0-9]\``
+                PB=1
+                opcmon `basename $0`=${JOBS:-0} -option ORACLE_HOME=$ORACLE_HOME \
+                             -option SID=$SID 
+	fi
+        rm -f $LOG
+	IFS=:
+    done
+        
+    unset IFS
+fi
+
+# to send a value of 0, if nothing has to be checked or everything works fine
+# Otherwise ITO will display "can't retrieve value ..."
+
+# by PPo: In order to kill the TIMEOUT killer process of the script
+kill %1         # kill 1st job
+
+if [ $PB != "1" ]
+then opcmon `basename $0`=0
+fi

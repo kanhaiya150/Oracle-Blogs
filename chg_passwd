@@ -1,0 +1,16 @@
+#!/bin/ksh
+#
+# file: chg_passwd
+
+export IFS=:
+cat /etc/ORATAB |grep -v ^# |while read ORACLE_SID ORACLE_HOME c USER d
+do
+echo $ORACLE_SID $ORACLE_HOME $USER
+su - $USER -c "
+sqlplus -s \"/ as sysdba\" << EOF
+alter user sys identified by passwd;
+alter user system identified by passwd;
+EOF
+exit
+"
+done

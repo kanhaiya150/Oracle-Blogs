@@ -1,0 +1,147 @@
+#
+# wait status of all sessions
+# Usage :  waistat <SID>
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+fi
+
+export SID=$1
+
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+export FILESTAT=v'\$'filestat
+export DATAFILE=v'\$'datafile
+export TS=ts'\$'
+export FILE=file'\$'
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+spool /tmp/`basename $0`.log
+
+select ts.name    ts,
+         i.name     name,
+         x.phyrds phys_read,
+         x.phywrts phys_write,
+         x.readtim read_time,
+         x.writetim write_time,
+         x.phyblkrd blk_read,
+         x.phyblkwrt blk_write,
+         round(i.bytes/1000000) size_MB
+from $FILESTAT x, $TS ts, $DATAFILE i,$FILE f
+where i.file#=f.file#
+   and ts.ts#=f.ts#
+   and x.file#=f.file#
+order by ts.name,i.name
+/
+spool off
+exit
+EOF
+"
+totio=0
+totiotemp=0
+grep -v "rows selec" /tmp/`basename $0`.log | while read tsname filename phys_read phys_write read_time write_time phys_blk_read phys_blk_write megabytes
+do
+	typeset -L14 tsname
+	typeset -L40 filename
+	typeset -L12 phys_read
+	typeset -L12 phys_write
+	typeset -L12 read_time
+	typeset -L12 write_time
+	typeset -L12 phys_blk_read
+	typeset -L12 phys_blk_write
+	typeset -L12 megabytes
+
+	if echo $phys_blk_read | grep -q -e [A-Z] -e "--"
+	then 
+		:
+	else
+        totio=`bc <<EOF
+$totio + $phys_blk_read + $phys_blk_write
+EOF`
+	fi
+ 	echo "$tsname	$filename	$phys_read	$phys_write	$phys_blk_read	$phys_blk_write	$megabytes"
+done
+echo "\n"
+
+grep -i temp /tmp/`basename $0`.log | while read tsname filename phys_read phys_write read_time write_time phys_blk_read phys_blk_write megabytes
+do
+        totiotemp=`bc <<EOF
+$totiotemp + $phys_blk_read + $phys_blk_write
+EOF`
+done
+
+PCT=`bc -l <<EOF
+scale=4
+$totiotemp * 100 / $totio
+EOF`
+echo "      totio=$totio\n
+      totiotemp=$totiotemp\n
+      PCT=$PCT"
+# pg /tmp/`basename $0`.log
+rm /tmp/`basename $0`.log

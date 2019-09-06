@@ -1,0 +1,38 @@
+#!/usr/bin/ksh
+#
+#
+
+if [ $# -lt 2 ]
+then
+        echo "Usage : $0 <instance> <object>"
+        exit 1
+fi
+if grep -q "^$1:" /etc/ORATAB 
+then
+	:
+else
+       echo "Instance <$1> not found "
+       cat /etc/ORATAB
+       exit 1
+fi
+
+export SID=$1
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+export VAR="sqlplus \"/ as sysdba \" "
+
+su - $USER -c "
+$VAR  <<EOF
+set pages 66
+set serveroutput on
+column type format a8
+column owner format a8
+column name format a25
+column tablespace_name format a15
+select segment_type as type, owner, segment_name as name, tablespace_name, sum(bytes)/1024/1024 as MB 
+from dba_segments 
+where segment_name like upper('$2%') group by segment_type, owner, segment_name, tablespace_name ;
+exit
+EOF
+"

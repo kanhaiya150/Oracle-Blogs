@@ -1,0 +1,151 @@
+#!/usr/bin/ksh
+#
+# Script intended to stop instance after having killed Oracle sessions
+#
+# Usage : $0 <instance name>
+#
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+
+if [ $# -ne 1 ]
+then
+	echo "Usage : $0 <instance name>"
+	echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+	exit 1
+else
+	if grep -q "^$1:" /etc/ORATAB
+	then
+		echo "\nInstance $1 exists in /etc/ORATAB\n"
+	else
+		echo "Instance <$1> does not exist Please check"
+		echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+		exit 1
+	fi
+fi
+
+export ORACLE_SID=$1
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full, before running this job "
+	echo "please clear all unecessary files in /tmp"
+	exit 1
+fi
+
+
+kill `ps -ef |grep "oracle$1 " |awk '{ print $2 }'`
+
+
+LOG=/tmp/`basename $0`.log
+rm -f $LOG
+
+IFS=:
+grep "^$ORACLE_SID:" /etc/ORATAB| read SID OHOME FLAG USER VG
+
+## svrmgrl or sqlplus
+  
+if [[ -x $OHOME/bin/svrmgrl ]]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+
+
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+	export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2=" $OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="ORACLE_SID=${SID};ORACLE_HOME=${OHOME};export ORACLE_SID ORACLE_HOME"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+             
+##
+             
+# first turn all tablespaces to end backup mode
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+spool $LOG
+select 'alter tablespace '||tablespace_name|| ' END BACKUP;' from dba_tablespaces;
+spool off
+!grep ^alter $LOG >/tmp/beginback$ORACLE_SID.sql
+spool $LOG
+@/tmp/beginback$ORACLE_SID.sql
+spool off
+exit
+EOF
+" 1>/dev/null 2>&1
+
+if grep ORA- $LOG|grep -v "ORA-01142"|grep -v "ORA-03217"
+then
+	echo "\nERROR occurs during shutdown Cannot shutdown database!!!!!!!!!"
+	echo "See previous oracle messages"
+	exit 1
+else
+        ed -s /etc/ORATAB <<EOF
+        /^${ORACLE_SID}:
+        s/:Y:/:N:
+        w
+        q
+EOF
+fi
+
+# if no error shut down database
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+spool $LOG
+shutdown immediate;
+exit;
+EOF
+" 1>/dev/null 2>&1
+     
+if grep ORA- $LOG
+then
+	echo "\nERROR occurs during shutdown!!!!!!!!!"
+	echo "See previous oracle messages"
+        ed -s /etc/ORATAB <<EOF
+        /^${ORACLE_SID}:
+        s/:N:/:Y:
+        w
+        q
+EOF
+	exit 1
+else
+	echo "Shutdown of instance <$SID> OK"
+fi
+
+rm -f /tmp/beginback$ORACLE_SID.sql
+rm -f $LOG
+

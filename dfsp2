@@ -1,0 +1,24 @@
+let Sum=0
+let n=0
+let Min=9999999
+let Max=0
+grep 'Sigma=' all.LOG | while read a b
+do
+	#echo $a $b
+	eval $b
+	echo Sigma $Sigma
+	if [ $Sigma -eq 0 ] ; then
+		:
+	else
+		let n=n+1
+		let Sum=Sum+Sigma
+		if [ $Max -lt $Sigma ] ; then
+			let Max=Sigma
+		fi
+		if [ $Min -gt $Sigma ] ; then
+			let Min=Sigma
+		fi
+	fi
+done
+let avrage=Sum/n
+echo n $n Sum $Sum avrage $avrage Max $Max Min $Min

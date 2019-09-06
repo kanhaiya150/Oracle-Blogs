@@ -1,0 +1,340 @@
+#!/bin/ksh
+#
+# Script intended to display the nb of processes running
+# Returns per option (name of the process) 1 if down, 0 if OK (running)
+#
+# Leave grep xx >/dev/null instead of grep -q since it's not supported on SUN
+#
+# Usage : $0
+#
+
+# by PPo: In order to get a log of this script
+exec 1>/tmp/`basename $0`.log 2>&1; date; set -x
+# by PPo: In order to set a TIMEOUT for the script
+#TIMEOUT=300; PID=$$; (sleep $TIMEOUT; kill $PID)&
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" )  alias bdf="/usr/bin/df -Ik"
+         alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias awk="/bin/nawk"
+         alias grep="/usr/xpg4/bin/grep" ;;
+"Linux") alias bdf="/bin/df -k"
+	 alias ll="ls -l" ;;
+esac
+
+if [ -s /etc/PATH ]
+then export PATH=$PATH:`cat /etc/PATH`
+fi
+PB=0
+
+PATH=/opt/OV/bin:$PATH
+
+# scans Oracle config by reading each line of /etc/ORATAB
+if [ -s /etc/ORATAB ]
+then
+
+     # do only one ps -ef to improve perf
+     PS_EF=`basename $0`.psef
+     ps -ef 2>&1 >$PS_EF
+
+     IFS=:
+     grep -v -e "^#" -e "^$" /etc/ORATAB|while read SID OHOME FLAG USER VG
+     do
+             PROC_MISSING=":"
+
+   	     if [[ $FLAG = "Y" ]]
+       	     then
+		     SNP=0
+		     DBW=0
+		     IOS=0
+		     QMN=0
+		     MTS=0
+               	     PROCLIST="ora_dbw. ora_smon ora_pmon ora_lgwr"
+                     LOG=$OHOME/`basename $0`.log
+                     rm -f $LOG
+
+                     ## svrmgrl or sqlplus
+     
+        		if [ -x $OHOME/bin/svrmgrl ]
+       	 		then
+           			VAR3=svrmgrl
+           			export VAR4="connect internal"
+        		else
+           			VAR3="sqlplus -s  \"/ as sysdba \" "
+           			export VAR4="set wrap off"
+           			export VAR5="set lines 500"
+        		fi
+
+                     ## csh or ksh
+                     if grep "^$USER:" /etc/passwd|grep csh$
+                     then
+                             export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+                             export VAR2=" $OHOME/bin/$VAR3 <<EOF >&/dev/null"
+                     else
+                             export VAR="ORACLE_SID=${SID};ORACLE_HOME=${OHOME};export ORACLE_SID ORACLE_HOME"
+                             export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+                     fi
+             
+                     ##
+             
+	             export DATABASE=v'\$'database
+	             export OPTION=v'\$'option
+	             export VERSION=v'\$'version
+	             export PARAMETER=v'\$'parameter
+             
+		     su - $USER -c "
+		     $VAR
+		     $VAR2
+		     $VAR4
+                     spool $LOG
+                     select log_mode from $DATABASE;
+                     select parameter,value from $OPTION;
+                     select name,value from $PARAMETER;
+		     select 'VERSION '||banner from $VERSION where banner like 'Oracle%';
+                     exit;
+EOF
+		     " # 1>/dev/null 2>&1
+     
+		     # test version
+		     VERSION=`grep "^VERSION " $LOG|cut -c15-15`
+		     
+		     if [[ $VERSION -eq 7 ]]
+		     then
+			   PROCLIST="ora_dbwr ora_smon ora_pmon ora_lgwr"
+		     else
+			   PROCLIST="ora_dbw0 ora_smon ora_pmon ora_lgwr ora_ckpt"
+		     fi	
+
+                     if grep -s -q "^ARCHIVELOG " $LOG
+                     then PROCLIST="$PROCLIST ora_arc."
+                     fi   
+     
+                     if grep -s "^checkpoint_process " $LOG | grep -i TRUE >/dev/null
+                     then PROCLIST="$PROCLIST ora_ckpt"
+                     fi
+     
+                     if [ "`grep "^distributed_transaction" $LOG | awk '{print $2}'`" -gt 0 ] >/dev/null
+                     then PROCLIST="$PROCLIST ora_reco"
+                     fi
+     
+                     if [ "`grep "^mts_dispatchers" $LOG | awk '{print $2}'`" != "" ] >/dev/null
+                     then PROCLIST="$PROCLIST ora_d00."
+                     fi
+     
+                     # snpashot process
+
+		     if grep -s -q "^job_queue_processes" $LOG
+		     then 
+			     SNP=`grep "^job_queue_processes" $LOG|awk '{print $2}'`
+			     if [ "${VERSION}" -eq 9 ] && [ ${SNP} -gt 0 ]
+        		     then
+                	     	PROCLIST="${PROCLIST} ora_cjq."
+                		SNP=0
+        	   	     fi
+		     fi
+     
+                     # mts server process
+
+		     if grep -s -q "^mts_servers" $LOG
+		     then 
+			     MTS=`grep "^mts_servers" $LOG|awk '{print $2}'`
+		     fi
+     
+                     # queue monitors process
+
+		     if grep -s -q "^aq_tm_processes" $LOG
+		     then 
+			     QMN=`grep "^aq_tm_processes" $LOG|awk '{print $2}'`
+		     fi
+     
+                     # db writer process
+
+		     if grep -s -q "^db_writers" $LOG
+		     then 
+		        DBW=`grep "^db_writers" $LOG|awk '{print $2}'`
+		     fi
+
+                     # db writer IO slaves process
+
+		     if grep -s -q "^dbwr_io_slaves" $LOG
+		     then 
+		        IOS=`grep "^dbwr_io_slaves" $LOG|awk '{print $2}'`
+		     fi
+
+                     rm -f $LOG
+         
+                     # Checking if all required processes are alive
+                     #
+		     unset IFS
+
+                     # normal processes
+	             for PROC in `echo $PROCLIST`
+	             do
+              	         if grep -v grep $PS_EF | grep " "$PROC"_"$SID" *$" >/dev/null
+                         then :
+                         else
+                              PROC_MISSING="$PROC_MISSING $PROC"
+                         fi
+	             done
+
+                     # snapshot processes
+                     i=0
+                     while [ $i -lt $SNP ]
+                     do
+              	         if grep -v grep $PS_EF| grep " ora_snp${i}_"$SID" *$" >/dev/null
+                         then :
+                         else
+                              PROC_MISSING="$PROC_MISSING ora_snp${i}"
+                         fi
+                         (( i = i + 1 ))
+                     done
+     
+                     # queue monitor processes
+                     l=0
+                     while [ $l -lt $QMN ]
+                     do
+              	         if grep -v grep $PS_EF| grep " ora_qmn${l}_"$SID" *$" >/dev/null
+                         then :
+                         else
+                              PROC_MISSING="$PROC_MISSING ora_qmn${l}"
+                         fi
+                         (( l = l + 1 ))
+                     done
+     
+                     # extra db_writer processes
+                     typeset -Z2 j=1  # use j instead of i to prevent conflict
+		     if [ $DBW -gt 1 ]
+		     then
+                          while [ $j -lt $DBW ]
+                          do
+              	              if grep -v grep $PS_EF| grep " ora_db${j}_"$SID" *$" >/dev/null
+                              then :
+                              else
+                                   PROC_MISSING="$PROC_MISSING ora_db${j}"
+                              fi
+                              typeset -Z2 j=`expr $j + 1` 
+                          done
+		     fi
+     
+                     # extra db_writer io slaves processes
+                     typeset -Z2 k=1  # use k instead of i or j to prevent conflict
+		     if [ $IOS -gt 1 ]
+		     then
+                          while [ $k -le $IOS ]
+                          do
+              	              if grep -v grep $PS_EF| grep " ora_i1${k}_"$SID" *$" >/dev/null
+                              then :
+                              else
+                                   PROC_MISSING="$PROC_MISSING ora_i1${k}"
+                              fi
+                              typeset -Z2 k=`expr $k + 1` 
+                          done
+		     fi
+     
+                     # mts servers processes
+                     typeset -Z2 m=0  # use m instead of i or j to prevent conflict
+		     if [ $MTS -gt 0 ]
+		     then
+                          while [ $m -lt $MTS ]
+                          do
+              	              if grep -v grep $PS_EF| grep " ora_s0${m}_"$SID" *$" >/dev/null
+                              then :
+                              else
+                                   PROC_MISSING="$PROC_MISSING ora_s0${m}"
+                              fi
+                              typeset -Z2 m=`expr $m + 1` 
+                          done
+		     fi
+
+                     # scans listener sql/net configuration by reading ${LISTENER_DIR}/listener.ora
+	             su - ${USER} -c "env|grep TNS_ADMIN >$LOG"			
+
+		     TNS_ADMIN=`cut -d= -f2 $LOG`
+		     LISTENER_DIR=${TNS_ADMIN:-/etc}
+		     rm -f $LOG
+
+                     if [ -s ${LISTENER_DIR}/listener.ora ]
+                     then
+			cat ${LISTENER_DIR}/listener.ora |
+                           awk '
+                           {
+                                   if (match($0,"SID_LIST_.*")!=0)
+                                           {
+                                           lis=substr($0,10);
+                                           };
+                                   if (match($0,".*SID_NAME.*")!=0)
+                                           {
+                                           pos=index($0,"=");
+                                           pos1=index($0,")");
+                                           long=pos1-pos;
+                                           long -= 1;
+                                           pos +=1;
+                                           printf "%s%s\n",lis,substr($0,pos,long);
+                                           }
+                                   else
+                                           {
+                                           prinf "notfound\n";
+                                           };
+                           }' |grep "= *${SID}" >$LOG
+export LISTENER=`head -1 $LOG|awk -F= '{print $1}'`
+      
+			  if [ "${VERSION}" -eq 9 ]
+			  then
+                          	if su - ${USER} -c "${VAR};lsnrctl status ${LISTENER} |grep \\\"${SID}\\\" |grep handler" >/dev/null
+                          	then : # Listener is present - OK
+                          	else
+                                	if [ `hostname` = "soap" ]
+                                	then :
+                                	else
+                                   	PROC_MISSING="$PROC_MISSING tnslsnr:$LISTENER"
+                                	fi
+                          	fi
+			  else
+                          	if su - ${USER} -c "${VAR};lsnrctl status ${LISTENER} |grep \" ${SID}	\" |grep handler" >/dev/null
+                          	then : # Listener is present - OK
+                          	else
+                                	if [ `hostname` = "soap" ]
+                                	then :
+                                	else
+                                   	PROC_MISSING="$PROC_MISSING tnslsnr:$LISTENER"
+                                	fi
+                          	fi
+			  fi
+
+                     else : # File ${LISTENER_DIR}/listener.ora is missing or SQL/NET not installed
+                     fi
+
+                     if [ "$PROC_MISSING" != ":" ]
+                     then
+                          PB=1
+                          opcmon `basename $0`=1                                \
+                                           -object procop                       \
+                                           -option PROC_MISSING="$PROC_MISSING" \
+                                           -option SID=$SID                     \
+                                           -option ORACLE_HOME=$OHOME
+                          opcmon `basename $0`=1                                \
+                                           -object procdba                      \
+                                           -option PROC_MISSING="$PROC_MISSING" \
+                                           -option SID=$SID                     \
+                                           -option ORACLE_HOME=$OHOME
+                     fi
+                          
+		     IFS=:
+       	     fi         # if FLAG=Y
+     done               # while read
+     unset IFS
+fi                      # if /etc/ORATAB
+
+# by PPo: In order to kill the TIMEOUT killer process of the script
+#kill %1         # kill 1st job
+
+
+# to send a value of 0, if nothing has to be checked or everything works fine
+# Otherwise ITO will display "can't retrieve value ..."
+
+if [ $PB != "1" ]
+then opcmon `basename $0`=0
+fi

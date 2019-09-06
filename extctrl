@@ -1,0 +1,182 @@
+## 
+
+################################################################
+###
+##
+# DO NOT FORGET TO MODIFY FOLLOWING PARAMETERS !!!!!!!!!!!!!!!!
+#
+
+export SOURCE_SID=STS
+export TARGET_SID=STC
+export SOURCE_OWNER=orasts
+export TARGET_OWNER=orastc
+export SOURCE_DIR=/oracle
+export SOURCE_ORACLE_HOME=${SOURCE_DIR}/${SOURCE_SID}
+export TARGET_DIR=/oracle
+export TARGET_ORACLE_HOME=${TARGET_DIR}/${TARGET_SID}
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+esac
+
+
+#
+##
+###
+################################################################
+#----------------------------------------------------------------------------------------------------
+echo "1  - backup controlfile source db to trace"
+echo "------------------------------------------"
+
+##############
+# backup controlfile to trace in order to get create control file script
+# and copy it to /tmp/ctl_${TARGET_SID}.sql
+#############
+
+export MYSTAT=v'\$'mystat
+export SESSION=v'\$'session
+export PARAMETER=v'\$'parameter
+export LOG=v'\$'log
+
+su - ${SOURCE_OWNER} -c "
+export ORACLE_SID=${SOURCE_SID}
+svrmgrl << EOF 1>/dev/null 2>&1
+
+connect internal
+alter database backup controlfile to trace resetlogs;
+
+spool ${SOURCE_ORACLE_HOME}/dbs/init/dump_${SOURCE_SID}.log
+select value from $PARAMETER where name ='user_dump_dest';
+spool off
+
+spool ${SOURCE_ORACLE_HOME}/dbs/init/process_${SOURCE_SID}.log
+select (process+1)  from $SESSION where sid=(select distinct sid from $MYSTAT);
+spool off
+
+exit
+EOF
+"
+
+#--------------
+# check errors
+#--------------
+
+if grep ORA- ${SOURCE_ORACLE_HOME}/dbs/init/dump_${SOURCE_SID}.log
+then
+	echo "An error has occured \n"
+	cat  ${SOURCE_ORACLE_HOME}/dbs/init/dump_${SOURCE_SID}.log
+	exit 1
+fi
+
+if grep ORA- ${SOURCE_ORACLE_HOME}/dbs/init/process_${SOURCE_SID}.log
+then
+	echo "An error has occured \n"
+	cat  ${SOURCE_ORACLE_HOME}/dbs/init/process_${SOURCE_SID}.log
+	exit 1
+fi
+
+#-------------------------
+#  copy trace file to ${SOURCE_ORACLE_HOME}/dbs/init
+#-------------------------
+
+if grep ^/ ${SOURCE_ORACLE_HOME}/dbs/init/dump_${SOURCE_SID}.log
+then
+	export SOURCE_DUMP=`grep ^/ ${SOURCE_ORACLE_HOME}/dbs/init/dump_${SOURCE_SID}.log|tr -d " "`
+else
+	export SOURCE_DUMP=`grep ^\? ${SOURCE_ORACLE_HOME}/dbs/init/dump_${SOURCE_SID}.log|sed 's!?!'${SOURCE_ORACLE_HOME}'!'|tr -d " "`
+fi
+
+mv ${SOURCE_DUMP}/ora_`grep "^ *[0-9]" ${SOURCE_ORACLE_HOME}/dbs/init/process_${SOURCE_SID}.log|grep -v row|tr -d " "`.trc ${SOURCE_ORACLE_HOME}/dbs/init/ctl_${TARGET_SID}.sql
+
+
+#----------------------------------------------------------------------------------------------------
+echo "7  - edit init{target}.ora"
+echo "--------------------------"
+
+cd ${TARGET_ORACLE_HOME}/dbs
+mv init${SOURCE_SID}.ora init${TARGET_SID}.ora
+
+
+ed -s init${TARGET_SID}.ora <<EOF
+1,$ s/\(db_name *= *\).*/\1${TARGET_SID}/
+1,$ s!/${SOURCE_SID}!/${TARGET_SID}!g
+1,$ s!${SOURCE_DIR}/!${TARGET_DIR}/!g
+w
+q
+EOF
+
+########################################################
+# modif SGA size
+# ie db_block_buffers and shared_pool_size
+########################################################
+
+# ed -s init${TARGET_SID}.ora <<EOF
+# /^db_block_buffers
+# s/\\(^db_block_buffers *= *\\)[0-9]*/\\13200
+# /^shared_pool_size
+# s/\\(^shared_pool_size *= *\\)[0-9]*/\\115360000
+# /^processes
+# s/\\(^processes *= *\\)[0-9]*/\\150
+# w
+# q
+# EOF
+
+#----------------------------------------------------------------------------------------------------
+echo "8  - edit create control file target"
+echo "------------------------------------"
+
+
+ed -s ${SOURCE_ORACLE_HOME}/dbs/init/ctl_${TARGET_SID}.sql <<EOF
+/STARTUP NOMOUNT
+-1
+1,.d
+/CREATE CONTROL
+. s/DATABASE/SET DATABASE/
+. s/${UPPER_SOURCE_SID}/${UPPER_TARGET_SID}
+. s/${SOURCE_ARCH}/${TARGET_ARCH}
+1,$ s!/${SOURCE_SID}/!/${TARGET_SID}/!g
+1,$ s!${SOURCE_DIR}/!${TARGET_DIR}/!g
+/RECOVER
+. s/RECOVER/RECOVER AUTOMATIC
+. s/FILE/FILE UNTIL CHANGE $LAST_CHG
+w
+q
+EOF
+
+grep -v "^#" ${SOURCE_ORACLE_HOME}/dbs/init/ctl_${TARGET_SID}.sql >${SOURCE_ORACLE_HOME}/dbs/init/ctl2_${TARGET_SID}.sql
+
+
+#----------------------------------------------------------------------------------------------------
+echo "9  - recreate control files"
+echo "---------------------------"
+
+su - ${TARGET_OWNER} -c "
+export ORACLE_SID=${TARGET_SID}
+export ORACLE_HOME=${TARGET_ORACLE_HOME}
+
+svrmgrl << EOF 1>/dev/null 2>&1
+connect internal
+
+spool ${SOURCE_ORACLE_HOME}/dbs/init/ctl2_${TARGET_SID}.log
+@${SOURCE_ORACLE_HOME}/dbs/init/ctl2_${TARGET_SID}.sql
+spool off
+exit
+EOF
+"
+
+#--------------
+# check errors
+#--------------
+
+if grep ORA- ${SOURCE_ORACLE_HOME}/dbs/init/ctl2_${TARGET_SID}.log
+then
+        echo "An error has occured \n"
+        cat  ${SOURCE_ORACLE_HOME}/dbs/init/ctl2_${TARGET_SID}.log
+        exit 1
+fi
+

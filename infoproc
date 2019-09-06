@@ -1,0 +1,137 @@
+#!/usr/bin/ksh -e
+# 
+# all details for one oracle process
+# Usage :  pro <process id>
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep"
+         alias awk="/usr/xpg4/bin/awk" ;;
+"Linux") alias bdf="/bin/df -k"
+	 alias grep="/bin/egrep"
+         alias ll="ls -l" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+then
+	echo "File system /tmp is full"
+	exit 1
+fi
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <process number>"
+        exit 1
+fi
+
+export PROC=$1
+ps -fp$PROC>/tmp/pro$PROC
+export   SID=`grep oracle /tmp/pro$PROC|awk '{if (match(substr($8,1,6),"oracle")) {print substr($8,7)} else {print substr($9,7)}}'`
+export TIMES=`grep oracle /tmp/pro$PROC|awk '{if (match(substr($8,1,6),"oracle")) {print $5} else {print $5" "$6}}'`
+export ETIME=`grep oracle /tmp/pro$PROC|awk '{if (match(substr($8,1,6),"oracle")) {print $7} else {print $8}}'`
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 500"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+	export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+
+export SESSION=v'\$'session
+export PROCESS=v'\$'process
+export MYSTAT=v'\$'mystat
+export SQLTEXT=v'\$'sqltext
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+spool /tmp/uu`basename $0`$$.log
+
+select S.Sid,S.serial#,NVL(P.spid,'N/A')"SPID",NVL(S.process,'N/A')"PROCESS",S.osuser,S.username,S.program,S.machine
+from $PROCESS P,$SESSION S
+where P.addr = S.paddr
+  and P.Spid = $PROC
+/
+spool off
+
+spool /tmp/sq`basename $0`$$.log
+Select  distinct S.sid, T.sql_text, T.piece
+from $SESSION S, $SQLTEXT T
+where S.sql_hash_value = T.hash_value
+  and S.SQL_address    = T.address
+  and S.Sid            in (select s.sid from $PROCESS P,$SESSION S where P.addr=S.paddr and P.Spid = $PROC)
+order by S.SID,T.piece
+/
+
+spool off
+exit
+EOF
+" 1>/dev/null 2>&1
+
+echo "			 STATISTICS FOR PROCESS No $PROC"
+echo "			---------------------------------"
+date
+LOG2=/tmp/uuu`basename $0`$$.log 
+grep -v -e "^ *SID" -e "^---" -e "row[s]* select" -e ^$ /tmp/uu`basename $0`$$.log >$LOG2
+sid=`cat $LOG2 |awk '{print $1}'`
+serial=`cat $LOG2 |awk '{print $2}'`
+spid=`cat $LOG2 |awk '{print $3}'`
+process=`cat $LOG2 |awk '{print $4}'`
+osuser=`cat $LOG2 |awk '{print $5}'`
+username=`cat $LOG2 |awk '{print $6}'`
+program=`cat $LOG2 |awk '{print $7}'`
+machine=`cat $LOG2 |awk '{print $8}'`
+
+echo "\nSTART TIME   : $TIMES"
+echo "ELAPSED TIME : $ETIME"
+echo "\nSID 	 : $sid\nSERIAL	 : $serial\nSPID	 : $spid\nPROCESS	 : $process"
+echo "OSUSER	 : $osuser\nUSERNAME : $username"
+echo "PROGRAM	 : $program\nMACHINE	 : $machine\nIP addr	 : \c"
+if [ -x /usr/contrib/bin/lsof ]
+then
+/usr/contrib/bin/lsof -p $PROC |grep TCP|awk '{print $9}'|cut -d">" -f2
+else 
+	echo lsof not found
+fi
+echo "\nSQL Text"
+echo "----------------------------------------------------------------"
+grep -v -e "^ *SID" -e "^---" -e "row[s]* select" -e ^$ /tmp/sq`basename $0`$$.log|cut -c12-76
+
+rm -f /tmp/uu`basename $0`$$.log
+rm -f /tmp/sq`basename $0`$$.log
+rm -f /tmp/pro$PROC
+rm -f $LOG2

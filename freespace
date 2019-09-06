@@ -1,0 +1,149 @@
+#!/usr/bin/ksh
+#
+# freespace of database
+# size of max free chunk
+# size of min free chunk
+# number of free chunks
+#
+# Usage :  freespace <SID>
+
+OSTYPE=$(uname -s)
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias ll="ls -l" ;;
+esac
+
+
+if [ "$LOGNAME" != "root" ]
+then
+	if [ -z "$LOGNAME" ]
+	then
+		:
+	else
+        	echo "you must launch this script as root"
+        	exit 1
+	fi
+fi
+
+if [ $# -ne 1 ]
+then
+        echo "Usage : $0 <instance name>"
+        echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+        exit 1
+else
+        if grep -q "^$1:" /etc/ORATAB
+        then
+                echo "\nInstance $1 exists in /etc/ORATAB\n"
+        else
+                echo "Instance <$1> does not exist Please check"
+                echo "List of existing instances : \n`grep -v -e "^#" -e "^$" /etc/ORATAB|cut -f1 -d:`"
+                exit 1
+        fi
+	if [ `bdf /tmp|grep tmp|awk '{print $5}'|tr -d %` -ge 98 ]
+	then
+		echo "File system /tmp is full"
+		exit 1
+	fi
+fi
+
+export SID=$1
+
+export  USER=`grep "^$SID:" /etc/ORATAB|cut -d: -f4`
+export  OHOME=`grep "^$SID:" /etc/ORATAB|cut -d: -f2`
+
+if [ -x $OHOME/bin/svrmgrl ]
+then
+        VAR3=svrmgrl
+        export VAR4="connect internal"
+else
+        VAR3="sqlplus -s  \"/ as sysdba \" "
+        export VAR4="set wrap off"
+        export VAR5="set lines 200"
+fi
+## csh or ksh
+if grep "^$USER:" /etc/passwd|grep -q csh$
+then
+        export VAR="setenv ORACLE_SID ${SID};setenv ORACLE_HOME ${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF >&/dev/null"
+else
+        export VAR="export ORACLE_SID=${SID};export ORACLE_HOME=${OHOME}"
+        export VAR2="$OHOME/bin/$VAR3 <<EOF 1>/dev/null 2>&1"
+fi
+
+##
+
+su - $USER -c "
+$VAR
+$VAR2
+$VAR4
+$VAR5
+set heading off
+set echo off
+spool /tmp/`basename $0`.free.log
+select tablespace_name,round(sum(F.bytes/1024/1024)),min(round(F.bytes)),max(round(F.bytes)),count(*)
+from dba_free_space F
+group by tablespace_name
+/
+spool off
+spool /tmp/`basename $0`.alloc.log
+select tablespace_name,round(sum(S.bytes/1024/1024))
+from dba_segments S
+group by tablespace_name
+/
+spool off
+spool /tmp/`basename $0`.tot.log
+select T.tablespace_name, round(sum(T.bytes/1024/1024)), count(file_id)
+from dba_data_files T
+group by T.tablespace_name
+/
+spool off
+exit
+EOF
+" >/dev/null
+
+grep [A-Z] /tmp/`basename $0`.tot.log|awk '{print $1"\t"$2"\t"$3}' |sort +0 >/tmp/`basename $0`.tot1
+grep [A-Z] /tmp/`basename $0`.alloc.log|awk '{print $1"\t"$2}' |sort +0 >/tmp/`basename $0`.alloc1
+grep [A-Z] /tmp/`basename $0`.free.log|awk '{print $1"\t"$2"\t"$3"\t"$4"\t"$5}' |sort +0 >/tmp/`basename $0`.free1
+
+typeset -L15 TN=""
+typeset -R5 TT="TOTAL"
+typeset -R5 TA="ALLOC"
+typeset -R5 TF="FREE"
+typeset -R10 mF="Min SEG"
+typeset -R10 MF="MAX SEG"
+typeset -R7 NE="NB FREE"
+typeset -R6 NF=""
+typeset -R6 PC=""
+
+echo "$TN	$TT	$TA	$PC	$TF	$mF	$MF	$NE	$NF"
+TN="TABLESPACE NAME"
+TT="Mbyte"
+TA="Mbyte"
+PC="%USED"
+TF="Mbyte"
+mF="bytes"
+MF="bytes"
+NE="extents"
+NF="NB FIC"
+echo "$TN	$TT	$TA	$PC	$TF	$mF	$MF	$NE	$NF"
+echo "---------------	-----	-----	------	-----	----------	----------	------	------"
+
+join -j1 1 -j2 1 -a 1 -e 0 -o 1.1,1.2,2.2,1.3 /tmp/`basename $0`.tot1 /tmp/`basename $0`.alloc1|( join -j1 1 -j2 1 -a 1 -e 0 -o 1.1,1.2,1.3,2.2,2.3,2.4,2.5,1.4 - /tmp/`basename $0`.free1 )| sort +0 |while read TN TT TA TF mF MF NE NF
+do
+	PC=`bc -l <<EOF
+scale=2
+$TA/($TT+1)*100
+EOF`
+	echo "$TN	$TT	$TA	$PC	$TF	$mF	$MF	$NE	$NF"
+done
+rm /tmp/`basename $0`.alloc.log
+rm /tmp/`basename $0`.alloc1
+rm /tmp/`basename $0`.free.log
+rm /tmp/`basename $0`.free1
+rm /tmp/`basename $0`.tot.log
+rm /tmp/`basename $0`.tot1

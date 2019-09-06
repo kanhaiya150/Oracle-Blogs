@@ -1,0 +1,235 @@
+#!/usr/bin/ksh -e
+#
+# Usage :  dfspace <SID>
+#
+
+usg()
+{
+echo "Usage : dfspace <instance>"
+echo "Instance : \n`grep -v "^#" /etc/ORATAB|cut -f1 -d:`"
+exit 1
+}
+OSTYPE=$(uname -s)
+
+case $OSTYPE in
+"AIX" ) alias bdf="/usr/bin/df -Ik"
+        alias ll="/usr/bin/ls -l" ;;
+"SunOS") alias bdf="/usr/bin/df -k"
+         alias ll="/usr/bin/ls -l"
+         alias grep="/usr/xpg4/bin/grep"
+         alias awk="/usr/xpg4/bin/awk" ;;
+"Linux") alias bdf="/bin/df -k"
+         alias ll="ls -l" ;;
+esac
+
+
+if [ $# -lt 1 ] ; then
+	usg
+fi
+
+if grep -q "^$1:" /etc/ORATAB ; then
+  :
+else 
+	usg
+fi
+
+IFS=:
+export LOG=/tmp/w.$$.log
+export ORACLE_SID=$1
+export USER=`grep "^$ORACLE_SID:" /etc/ORATAB | cut -d: -f4`
+export INSTANCE=v'\$'instance
+export RESULT=/tmp/dfspace_$1
+
+su - $USER -c "
+sqlplus -S \"/ as sysdba\" << EOF 
+set serveroutput on size 999999
+set feedback off
+set lines 130
+declare
+  sql_stmt varchar2(300);
+  table_or_view_exist exception;
+  PRAGMA EXCEPTION_INIT(table_or_view_exist, -955);
+begin
+  sql_stmt :='create table fs_usage (fs_name varchar2(80), sigma_tbs number default 0)';
+  execute immediate sql_stmt;
+exception
+   when table_or_view_exist then
+   sql_stmt :='truncate table fs_usage' ;
+   execute immediate sql_stmt;
+   dbms_output.put_line(sql_stmt);
+end;
+/
+
+create or replace procedure maj (fs in out varchar2, s in out number )
+is
+begin
+	update fs_usage set sigma_tbs=sigma_tbs+s where fs_name = fs;
+	if SQL%ROWCOUNT=0 then 
+    insert into fs_usage values(fs, s);
+  end if;
+  commit;
+end maj;
+/
+
+declare
+  sql_stmt varchar2(300) := 
+  	'create table dba_free_space_dfspace as SELECT a.file_id,SUM(bytes) as bytes 
+   	FROM dba_free_space a GROUP BY a.file_id';
+  table_or_view_does_not_exist exception;
+  PRAGMA EXCEPTION_INIT(table_or_view_does_not_exist, -942);
+begin
+  execute immediate 'drop table dba_free_space_dfspace';
+  execute immediate sql_stmt;
+exception
+   when table_or_view_does_not_exist then
+   execute immediate sql_stmt;
+end;
+/
+
+create or replace function tbs_free_space(contents in varchar2, 
+											extent_management in varchar2, file_id2 in number) 
+return number
+is
+free number;
+begin
+  if contents = 'TEMPORARY' and extent_management = 'LOCAL' then
+    free := 0;
+  else
+    select nvl(bytes,0) into free from dba_free_space_dfspace a
+    where a.file_id = file_id2;
+  end if;
+  return free;
+exception
+	when no_data_found
+	then
+	  return 0;
+end tbs_free_space;
+/
+
+spool $LOG
+
+declare
+  version number ;              -- version
+  t char(20):=            'Tbs' ;
+  e char(3) ;              -- extend_management
+  o char(10):=            'Mngt';
+  f char(76):=            'File';
+  wm char(6) :=           'WMark';
+  mx char(6) :=           'MaxSz';
+  maxsiz number :=0;      -- maxsize
+  free number := 0;       -- free
+  alo char(6) :=          'Alloc';
+  p number := 0; 
+  pct char(6) :=          '  %';
+  s number  := 0;         -- sigma maxsize filesystem
+  m number  := 0;         -- sigma maxsize tbs
+  fr number  := 0;        -- sigma free tbs
+  w number  := 0;         -- sigma WaterMark tbs
+  fs varchar(80):='deb';  -- rupture filesystem
+  l number(3,0) ;         -- counter
+  thres number  := 96;    -- filling threshold
+  x number := 0;
+  y number := 0;
+begin
+	lock table fs_usage in exclusive mode nowait;
+  select substr(version,1,instr(version,'.')-1)
+  into version
+  from ${INSTANCE};
+  dbms_output.put_line(t||f||wm||mx||alo||pct||o);
+  dbms_output.put_line('----------');
+  if version in (8,9,10) then
+    for i in (select tablespace_name, extent_management, contents
+	            from dba_tablespaces order by 1)
+    loop
+      for j in (select autoextensible, bytes, maxbytes, file_name, file_id
+                from dba_data_files where tablespace_name=i.tablespace_name
+                union
+                select autoextensible, bytes, maxbytes, file_name, file_id
+                from dba_temp_files where tablespace_name=i.tablespace_name order by 2)
+      loop
+        e := substr(i.extent_management,1,3);
+        free:=tbs_free_space(i.contents, i.extent_management, j.file_id);
+
+        t := substr(i.tablespace_name,1,20);
+        if j.autoextensible = 'YES' then
+          o := e||'aut'||substr(i.contents,1,1) ;
+          maxsiz := j.maxbytes ;
+        else
+          o := e||'std'||substr(i.contents,1,1) ;
+          maxsiz := j.bytes ;
+        end if;
+        f := substr(j.file_name, 1, 64);
+        if instr( f, fs, 1, 1) > 0 then             -- file in same fs
+          null;
+        else																			  -- new filesystem
+          if s > 0 then
+     		    maj ( fs, s) ;
+          end if;
+		      y := 4 ; l := 0 ;
+		      while y > 0 and l = 0 										-- fs=/xx/yy/zz/
+		      loop
+  	        l:= instr(j.file_name,'/',1,y) ;
+		        y := y - 1;
+		      end loop;
+          fs:= substr(j.file_name,1,l) ;
+          s:= 0; 																		-- sigma maxsize / fs
+        end if;
+        wm := lpad(to_char(round(j.bytes/1024/1024)),5);
+        p := 100*(j.bytes-free)/(maxsiz+1) ;
+        pct := lpad(to_char(round(p)),3);
+        if maxsiz > 30000000000 then
+          mx := 'Unlim' ;
+        else
+          mx := lpad(to_char(round(maxsiz/1024/1024)),5);
+        end if ;
+        alo := lpad(to_char(round((j.bytes-free)/1024/1024)),5);
+        dbms_output.put_line(t||f||wm||mx||alo||pct||o);
+        x := x + 1 ;                                
+        s := s + maxsiz ;														-- sum per fs 	
+        m := m + maxsiz ;														-- sum per tbs
+        fr := fr + free ;
+        w := w + j.bytes ;
+      end loop;																			-- loop j on data_file
+			if x > 1 then																	-- x datafiles / tbs
+      	f := '.' ;
+        wm := lpad(to_char(round(w/1024/1024)),5);
+        mx := lpad(to_char(round(m/1024/1024)),5);
+        p := 100*(w-fr)/(m+1) ;
+        pct := lpad(to_char(round(p)),3);
+        alo := lpad(to_char(round((w-fr)/1024/1024)),5);
+      	dbms_output.put_line(t||f||wm||mx||alo||pct);
+      end if;
+ 			x := 0; m := 0; fr := 0; w := 0;
+      if p > thres and i.contents <> 'TEMPORARY' then
+            dbms_output.put_line('tbs='||rtrim(t)||' pct='||ltrim(pct));
+      end if;
+    end loop;																				-- loop j on tablespace
+    dbms_output.put_line('----------');
+    maj (fs, s) ;
+ 
+    for k in (select fs_name, sigma_tbs from fs_usage)
+    loop
+      dbms_output.put_line('fs='||k.fs_name||' SigmaTbs='||round(k.sigma_tbs/1024/1024));
+    end loop;
+  else
+     dbms_output.put_line('version <> 8i-9i-10g');
+  end if;
+end;
+/
+spool off
+EOF
+" >/dev/null
+
+cp $LOG $RESULT
+cat $RESULT | grep -v 'fs='
+cat ${LOG} | grep 'fs=' |while read line
+do
+  eval $line
+  FS_SIZ=$(bdf $fs|tail -1| \
+  awk '{if (match(substr($0,1,2),"  ")) {print int($1/1024)} 
+  		else {print int($2/1024)}}' | tr -d %)
+  if [ $SigmaTbs -gt $FS_SIZ ] ;then
+    echo "ALARM Fs_Use $fs sigma_tbs_maxsize=$SigmaTbs '>' fs_size=$FS_SIZ" 
+  fi
+done
+rm -f $LOG
